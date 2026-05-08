@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Projeto 12A 2026 — Qualidade do Ar (MQTT)</title>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/mqttws31.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+body {
+  background: #1b1b1b;
+  color: #e0e0e0;
+  font-family: "Segoe UI", Arial, sans-serif;
+  margin: 0;
+  padding: 0;
+  text-align: center;
+}
+
+h1 {
+  margin-top: 20px;
+  font-weight: 300;
+  color: #4db6ff;
+}
+
+#cards {
+  display: flex;
+  justify-content: center;
+  gap: 30px;
+  margin-top: 20px;
+}
+
+.card {
+  background: #2a2a2a;
+  padding: 20px;
+  border-radius: 10px;
+  width: 150px;
+  font-size: 22px;
+  border: 1px solid #3a3a3a;
+}
+
+.value {
+  font-size: 40px;
+  margin-top: 10px;
+}
+
+#chartContainer {
+  width: 90%;
+  margin: 40px auto;
+  background: #222;
+  padding: 20px;
+  border-radius: 10px;
+  border: 1px solid #333;
+}
+
+.alertBox {
+  margin-top: 20px;
+  font-size: 24px;
+  padding: 10px;
+  border-radius: 8px;
+  display: inline-block;
+}
+
+button {
+  margin-top: 20px;
+  padding: 10px 20px;
+  background: #4db6ff;
+  border: none;
+  border-radius: 6px;
+  color: #000;
+  font-size: 18px;
+  cursor: pointer;
+}
+</style>
+</head>
+
+<body>
+
+<h1>🌍 Projeto 12A 2026 — Qualidade do Ar (MQTT)</h1>
+
+<div id="cards">
+  <div class="card">PM1<div id="pm1" class="value">--</div></div>
+  <div class="card">PM2.5<div id="pm25" class="value">--</div></div>
+  <div class="card">PM10<div id="pm10" class="value">--</div></div>
+</div>
+
+<div id="chartContainer">
+  <canvas id="chart"></canvas>
+</div>
+
+<div id="alert" class="alertBox">Sem dados suficientes</div>
+
+<button onclick="exportCSV()">Exportar CSV (24h)</button>
+
+<script>
+// ----------------------------
+// MQTT CONFIG
+// ----------------------------
+let client = new Paho.MQTT.Client(
+  "86f6fdb8a2664cbb8fce0ad02388a8f0.s1.eu.hivemq.cloud",
+  8884,
+  "dashboard_rui_" + Math.random()
+);
+
+client.connect({
+  useSSL: true,
+  userName: "12Ano_A",
+  password: "Projeto2025",
+  onSuccess: () => client.subscribe("rui/air/pm")
+});
+
+// ----------------------------
+// INDEXEDDB (24h histórico)
+// ----------------------------
+let db;
+let request = indexedDB.open("AirQualityDB_Web", 1);
+
+request.onupgradeneeded = function(event) {
+  db = event.target.result;
+  db.createObjectStore("readings", { keyPath: "timestamp" });
+};
+
+request.onsuccess = function(event) {
+  db = event.target.result;
+};
+
+function saveReading(data) {
+  let tx = db.transaction("readings", "readwrite");
+  let store = tx.objectStore("readings");
+  store.put(data);
+
+  let limit = Date.now() - 24 * 60 * 60 * 1000;
+  store.openCursor().onsuccess = function(e) {
+    let cursor = e.target.result;
+    if (cursor && cursor.key < limit) {
+      cursor.delete();
+      cursor.continue();
+    }
+  };
+}
+
+// ----------------------------
+// CHART CONFIG
+// ----------------------------
+let ctx = document.getElementById("chart").getContext("2d");
+
+let chart = new Chart(ctx, {
+  type: "line",
+  data: {
+    labels: [],
+    datasets: [
+      {
+        label: "PM1",
+        data: [],
+        borderColor: "#4db6ff",
+        borderWidth: 2,
+        tension: 0,
+        fill: false
+      },
+      {
+        label: "PM2.5",
+        data: [],
+        borderColor: "#00e676",
+        borderWidth: 2,
+        tension: 0,
+        fill: false
+      },
+      {
+        label: "PM10",
+        data: [],
+        borderColor: "#ff9100",
+        borderWidth: 2,
+        tension: 0,
+        fill: false
+      }
+    ]
+  },
+  options: {
+    scales: {
+      x: { ticks: { color: "#aaa" }, grid: { color: "#333" } },
+      y: { ticks: { color: "#aaa" }, grid: { color: "#333" } }
+    },
+    plugins: {
+      legend: { labels: { color: "#ddd" } }
+    }
+  }
+});
+
+// ----------------------------
+// ALERTA
+// ----------------------------
+function updateAlert(pm25) {
+  let box = document.getElementById("alert");
+
+  if (pm25 <= 15) {
+    box.style.background = "#1e4620";
+    box.style.color = "#9cff9c";
+    box.innerText = "Bom";
+  } else if (pm25 <= 25) {
+    box.style.background = "#665c00";
+    box.style.color = "#fff59d";
+    box.innerText = "Moderado";
+  } else if (pm25 <= 50) {
+    box.style.background = "#8a4b00";
+    box.style.color = "#ffcc80";
+    box.innerText = "Má Qualidade";
+  } else if (pm25 <= 100) {
+    box.style.background = "#7b1fa2";
+    box.style.color = "#e1bee7";
+    box.innerText = "Muito Má";
+  } else {
+    box.style.background = "#b71c1c";
+    box.style.color = "#ffcdd2";
+    box.innerText = "Perigoso";
+  }
+}
+
+// ----------------------------
+// RECEBER MQTT
+// ----------------------------
+client.onMessageArrived = (msg) => {
+  let data = JSON.parse(msg.payloadString);
+
+  document.getElementById("pm1").innerText = data.pm1;
+  document.getElementById("pm25").innerText = data.pm25;
+  document.getElementById("pm10").innerText = data.pm10;
+
+  updateAlert(data.pm25);
+
+  let now = new Date();
+  let timeLabel = now.toLocaleTimeString();
+
+  chart.data.labels.push(timeLabel);
+  chart.data.datasets[0].data.push(data.pm1);
+  chart.data.datasets[1].data.push(data.pm25);
+  chart.data.datasets[2].data.push(data.pm10);
+
+  if (chart.data.labels.length > 300) {
+    chart.data.labels.shift();
+    chart.data.datasets.forEach(ds => ds.data.shift());
+  }
+
+  chart.update();
+
+  saveReading({
+    timestamp: now.getTime(),
+    pm1: data.pm1,
+    pm25: data.pm25,
+    pm10: data.pm10
+  });
+};
+
+// ----------------------------
+// EXPORTAR CSV
+// ----------------------------
+function exportCSV() {
+  let tx = db.transaction("readings", "readonly");
+  let store = tx.objectStore("readings");
+
+  let csv = "timestamp,pm1,pm25,pm10\n";
+
+  store.openCursor().onsuccess = function(e) {
+    let cursor = e.target.result;
+    if (cursor) {
+      let d = cursor.value;
+      csv += `${new Date(d.timestamp).toISOString()},${d.pm1},${d.pm25},${d.pm10}\n`;
+      cursor.continue();
+    } else {
+      let blob = new Blob([csv], { type: "text/csv" });
+      let url = URL.createObjectURL(blob);
+
+      let a = document.createElement("a");
+      a.href = url;
+      a.download = "air_quality_24h.csv";
+      a.click();
+    }
+  };
+}
+</script>
+
+</body>
+</html>
